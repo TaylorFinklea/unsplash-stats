@@ -64,7 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--delay-seconds",
         type=float,
         default=0.25,
-        help="Additional delay between per-photo stats calls.",
+        help="Additional delay between paginated user-photo requests.",
     )
     collect_parser.add_argument(
         "--rate-limit-fraction",
@@ -132,6 +132,33 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
+def _print_api_progress(event: dict[str, object]) -> None:
+    completed = int(event.get("completed_calls", 0))
+    expected = event.get("expected_total_calls")
+    percent_complete = event.get("percent_complete")
+    status_code = event.get("status_code", "?")
+    path = str(event.get("path", ""))
+    rate_limited = bool(event.get("rate_limited", False))
+    wait_seconds = event.get("rate_limit_wait_seconds")
+
+    if isinstance(expected, int) and expected > 0 and isinstance(percent_complete, (int, float)):
+        progress = f"{completed}/{expected} ({float(percent_complete):.1f}%)"
+    else:
+        progress = f"{completed} calls"
+
+    suffix = ""
+    if rate_limited:
+        if isinstance(wait_seconds, (int, float)):
+            suffix = f" rate-limited, waiting {float(wait_seconds):.2f}s and retrying"
+        else:
+            suffix = " rate-limited, retrying"
+
+    print(
+        f"API progress: {progress} | status={status_code} | endpoint={path}{suffix}",
+        flush=True,
+    )
+
+
 def _run_collect(args: argparse.Namespace) -> int:
     if not args.access_key:
         print(
@@ -165,6 +192,7 @@ def _run_collect(args: argparse.Namespace) -> int:
             rate_limit_fraction=args.rate_limit_fraction,
             min_request_interval_seconds=args.min_request_interval_seconds,
             strict=args.strict,
+            progress_hook=_print_api_progress,
         )
     except UnsplashAPIError as exc:
         print(str(exc), file=sys.stderr)
@@ -182,6 +210,12 @@ def _run_collect(args: argparse.Namespace) -> int:
     )
     if result.api_rate_limit_per_hour is not None:
         print(f"Unsplash rate limit: {result.api_rate_limit_per_hour} requests/hour")
+    if result.estimated_total_api_calls is not None:
+        print(
+            f"API calls made: {result.api_calls_made}/{result.estimated_total_api_calls}"
+        )
+    else:
+        print(f"API calls made: {result.api_calls_made}")
     if result.throttle_interval_seconds is not None:
         print(
             "Applied throttle: one request every {seconds:.2f}s "

@@ -9,7 +9,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,7 @@ class UnsplashClient:
         user_agent: str = "unsplash-stats-tracker/0.1",
         min_request_interval_seconds: float = 0.0,
         rate_limit_retry_max_sleep_seconds: float = 1800.0,
+        request_observer: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         if not access_key:
             raise ValueError("access_key is required")
@@ -52,6 +53,8 @@ class UnsplashClient:
             5.0, float(rate_limit_retry_max_sleep_seconds)
         )
         self._last_request_at_monotonic: float | None = None
+        self.request_count = 0
+        self.request_observer = request_observer
 
     def set_min_request_interval(self, interval_seconds: float) -> None:
         self.min_request_interval_seconds = max(0.0, float(interval_seconds))
@@ -90,18 +93,33 @@ class UnsplashClient:
         per_page: int = 30,
         max_pages: int | None = None,
         max_items: int | None = None,
+        include_stats: bool = True,
+        stats_resolution: str = "days",
+        stats_quantity: int = 30,
+        page_delay_seconds: float = 0.0,
     ):
         per_page = max(1, min(per_page, 30))
         emitted = 0
         page = 1
+        page_delay_seconds = max(0.0, float(page_delay_seconds))
 
         while True:
             if max_pages is not None and page > max_pages:
                 break
 
+            params: dict[str, Any] = {
+                "page": page,
+                "per_page": per_page,
+                "order_by": "latest",
+            }
+            if include_stats:
+                params["stats"] = "true"
+                params["resolution"] = stats_resolution
+                params["quantity"] = max(1, int(stats_quantity))
+
             photos = self._request(
                 f"/users/{username}/photos",
-                params={"page": page, "per_page": per_page, "order_by": "latest"},
+                params=params,
             )
             if not isinstance(photos, list) or not photos:
                 break
@@ -114,6 +132,9 @@ class UnsplashClient:
 
             if len(photos) < per_page:
                 break
+
+            if page_delay_seconds > 0:
+                time.sleep(page_delay_seconds)
 
             page += 1
 
@@ -134,6 +155,18 @@ class UnsplashClient:
                     self._last_request_at_monotonic = time.monotonic()
                     self._update_rate_limit(response.headers)
                     raw_body = response.read().decode("utf-8")
+                    if not raw_body:
+                        parsed_body: Any = {}
+                    else:
+                        parsed_body = json.loads(raw_body)
+                    self.request_count += 1
+                    self._notify_request(
+                        path=path,
+                        params=params,
+                        status_code=response.status,
+                        response_data=parsed_body if isinstance(parsed_body, dict) else None,
+                    )
+                    return parsed_body
             except urllib.error.HTTPError as exc:
                 self._last_request_at_monotonic = time.monotonic()
                 self._update_rate_limit(exc.headers)
@@ -152,10 +185,25 @@ class UnsplashClient:
                 except json.JSONDecodeError:
                     pass
 
-                if self._is_rate_limited(exc.code, message, payload):
+                is_rate_limited = self._is_rate_limited(exc.code, message, payload)
+                wait_seconds: float | None = None
+                if is_rate_limited:
                     wait_seconds = self._compute_rate_limit_wait_seconds(
                         exc.headers, rate_limit_hits
                     )
+
+                self.request_count += 1
+                self._notify_request(
+                    path=path,
+                    params=params,
+                    status_code=exc.code,
+                    rate_limited=is_rate_limited,
+                    rate_limit_wait_seconds=wait_seconds,
+                    error_message=message,
+                    response_data=payload,
+                )
+
+                if is_rate_limited:
                     rate_limit_hits += 1
                     logger.warning(
                         "Rate limit response received (status=%s, remaining=%s). "
@@ -171,9 +219,35 @@ class UnsplashClient:
             except urllib.error.URLError as exc:
                 raise UnsplashAPIError(0, f"Connection error: {exc.reason}") from exc
 
-            if not raw_body:
-                return {}
-            return json.loads(raw_body)
+    def _notify_request(
+        self,
+        *,
+        path: str,
+        params: dict[str, Any] | None,
+        status_code: int,
+        rate_limited: bool = False,
+        rate_limit_wait_seconds: float | None = None,
+        error_message: str | None = None,
+        response_data: dict[str, Any] | None = None,
+    ) -> None:
+        if self.request_observer is None:
+            return
+        event: dict[str, Any] = {
+            "request_count": self.request_count,
+            "path": path,
+            "params": params or {},
+            "status_code": status_code,
+            "rate_limited": rate_limited,
+            "rate_limit_wait_seconds": rate_limit_wait_seconds,
+            "error_message": error_message,
+            "response_data": response_data,
+            "rate_limit": self.rate_limit,
+            "rate_limit_remaining": self.rate_limit_remaining,
+        }
+        try:
+            self.request_observer(event)
+        except Exception:
+            logger.exception("Request observer raised an error.")
 
     def _enforce_min_request_interval(self) -> None:
         if self.min_request_interval_seconds <= 0:

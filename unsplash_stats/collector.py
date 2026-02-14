@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .api import UnsplashAPIError, UnsplashClient
 from .db import (
@@ -26,6 +25,8 @@ class CollectionResult:
     photos_seen: int
     photos_saved: int
     photo_errors: int
+    api_calls_made: int
+    estimated_total_api_calls: int | None
     api_rate_limit_per_hour: int | None
     throttle_interval_seconds: float | None
     throttle_target_requests_per_hour: float | None
@@ -59,6 +60,24 @@ def _request_interval_for_hourly_budget(
     return 3600.0 / target_requests_per_hour
 
 
+def _estimate_photo_pages(
+    total_photos: int | None, *, max_photos: int | None, max_pages: int | None, per_page: int
+) -> int | None:
+    if total_photos is None:
+        return None
+    if total_photos <= 0:
+        return 0
+
+    constrained_total = total_photos
+    if max_photos is not None:
+        constrained_total = min(constrained_total, max(0, max_photos))
+
+    page_count = (constrained_total + per_page - 1) // per_page
+    if max_pages is not None:
+        page_count = min(page_count, max(0, max_pages))
+    return page_count
+
+
 def collect_snapshot(
     *,
     access_key: str,
@@ -70,9 +89,51 @@ def collect_snapshot(
     rate_limit_fraction: float = 0.8,
     min_request_interval_seconds: float = 0.0,
     strict: bool = False,
+    progress_hook: Callable[[dict[str, Any]], None] | None = None,
 ) -> CollectionResult:
+    expected_total_api_calls: int | None = None
+    api_calls_made = 0
+
+    def _handle_request_event(event: dict[str, Any]) -> None:
+        nonlocal api_calls_made, expected_total_api_calls
+        api_calls_made = int(event.get("request_count", api_calls_made))
+
+        if (
+            expected_total_api_calls is None
+            and event.get("path") == f"/users/{username}"
+            and int(event.get("status_code", 0)) < 400
+        ):
+            response_data = event.get("response_data")
+            if isinstance(response_data, dict):
+                photo_pages = _estimate_photo_pages(
+                    _as_int(response_data.get("total_photos")),
+                    max_photos=max_photos,
+                    max_pages=max_pages,
+                    per_page=30,
+                )
+                if photo_pages is not None:
+                    expected_total_api_calls = 2 + photo_pages
+
+        percent_complete: float | None = None
+        if expected_total_api_calls and expected_total_api_calls > 0:
+            percent_complete = min(
+                100.0, (api_calls_made / expected_total_api_calls) * 100.0
+            )
+
+        if progress_hook is not None:
+            progress_hook(
+                {
+                    **event,
+                    "completed_calls": api_calls_made,
+                    "expected_total_calls": expected_total_api_calls,
+                    "percent_complete": percent_complete,
+                }
+            )
+
     client = UnsplashClient(
-        access_key, min_request_interval_seconds=min_request_interval_seconds
+        access_key,
+        min_request_interval_seconds=min_request_interval_seconds,
+        request_observer=_handle_request_event,
     )
     collected_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -99,22 +160,29 @@ def collect_snapshot(
     photo_rows: list[dict[str, Any]] = []
 
     for photo in client.iter_user_photos(
-        username, per_page=30, max_pages=max_pages, max_items=max_photos
+        username,
+        per_page=30,
+        max_pages=max_pages,
+        max_items=max_photos,
+        include_stats=True,
+        stats_resolution="days",
+        stats_quantity=30,
+        page_delay_seconds=delay_seconds,
     ):
         photos_seen += 1
         photo_id = str(photo.get("id"))
-        try:
-            stats = client.get_photo_statistics(photo_id, resolution="days", quantity=30)
-        except UnsplashAPIError as exc:
-            photo_errors += 1
-            if strict:
-                raise
-            logger.warning("Skipping photo %s due to API error: %s", photo_id, exc)
-            if delay_seconds > 0:
-                time.sleep(delay_seconds)
-            continue
 
-        stats = _as_dict(stats)
+        stats = _as_dict(photo.get("statistics"))
+        if not stats:
+            photo_errors += 1
+            message = (
+                f"Missing statistics for photo {photo_id} in /users/{username}/photos "
+                "(expected when requesting stats=true)."
+            )
+            if strict:
+                raise UnsplashAPIError(0, message)
+            logger.warning(message)
+
         downloads = _as_dict(stats.get("downloads"))
         views = _as_dict(stats.get("views"))
         likes = _as_dict(stats.get("likes"))
@@ -142,9 +210,6 @@ def collect_snapshot(
                 },
             }
         )
-
-        if delay_seconds > 0:
-            time.sleep(delay_seconds)
 
     user = _as_dict(user)
     user_stats = _as_dict(user_stats)
@@ -188,6 +253,8 @@ def collect_snapshot(
         photos_seen=photos_seen,
         photos_saved=len(photo_rows),
         photo_errors=photo_errors,
+        api_calls_made=api_calls_made,
+        estimated_total_api_calls=expected_total_api_calls,
         api_rate_limit_per_hour=client.rate_limit,
         throttle_interval_seconds=throttle_interval_seconds,
         throttle_target_requests_per_hour=(

@@ -43,6 +43,8 @@ uv sync
 uv run --env-file .env python -m unsplash_stats.cli collect --username tfinklea
 ```
 
+The CLI prints progress after every API call, including estimated done percent when available.
+
 This writes:
 
 - SQLite DB: `data/unsplash_stats.sqlite`
@@ -80,6 +82,20 @@ Use stricter throttling (50% of API limit):
 uv run --env-file .env python -m unsplash_stats.cli collect --username tfinklea --rate-limit-fraction 0.5
 ```
 
+Add extra delay between paginated photo requests:
+
+```bash
+uv run --env-file .env python -m unsplash_stats.cli collect --username tfinklea --delay-seconds 2
+```
+
+## API strategy
+
+- Account totals: `GET /users/:username/statistics`
+- Per-photo stats: `GET /users/:username/photos?stats=true&resolution=days&quantity=30`
+- Request volume is approximately:
+  - `2 + number_of_photo_pages`
+  - instead of `2 + number_of_photo_pages + number_of_photos`
+
 ## Rate limiting
 
 - Collector auto-throttles using `X-Ratelimit-Limit` from Unsplash API responses.
@@ -100,5 +116,6 @@ Run every 6 hours via cron (safer when throttling heavily):
 ## Notes
 
 - The collector uses official Unsplash API endpoints (more stable than scraping HTML).
-- Per-photo stats are fetched one photo at a time and can take a long time at low request rates. Use `--max-photos`/`--max-pages` to shorten runs.
+- Per-photo stats are taken from paginated user-photo responses (`stats=true`) to keep request count low.
+- Use `--max-photos`/`--max-pages` to shorten runs for smoke tests.
 - SQLite + CSV output is ready for a Streamlit dashboard in the next step.
