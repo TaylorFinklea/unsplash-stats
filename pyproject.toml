@@ -1,0 +1,10 @@
+[project]
+name = "unsplash-stats"
+version = "0.1.0"
+description = "Point-in-time Unsplash stats collector for SQLite + CSV"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.uv]
+package = false

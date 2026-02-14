@@ -1,0 +1,2 @@
+"""Unsplash stats snapshot collector."""
+
