@@ -185,8 +185,6 @@ def collect_snapshot(
 
         downloads = _as_dict(stats.get("downloads"))
         views = _as_dict(stats.get("views"))
-        likes = _as_dict(stats.get("likes"))
-
         photo_rows.append(
             {
                 "photo_id": photo_id,
@@ -194,15 +192,15 @@ def collect_snapshot(
                 "photo_description": photo.get("description")
                 or photo.get("alt_description"),
                 "photo_created_at": photo.get("created_at"),
-                "photo_likes": _as_int(photo.get("likes")),
+                "photo_likes": None,
                 "downloads_total": _as_int(downloads.get("total")),
                 "views_total": _as_int(views.get("total")),
-                "likes_total": _as_int(likes.get("total")),
+                "likes_total": None,
                 "downloads_change_30d": _as_int(
                     _as_dict(downloads.get("historical")).get("change")
                 ),
                 "views_change_30d": _as_int(_as_dict(views.get("historical")).get("change")),
-                "likes_change_30d": _as_int(_as_dict(likes.get("historical")).get("change")),
+                "likes_change_30d": None,
                 "raw_json": {
                     "photo": photo,
                     "statistics": stats,
@@ -215,8 +213,6 @@ def collect_snapshot(
     user_stats = _as_dict(user_stats)
     downloads = _as_dict(user_stats.get("downloads"))
     views = _as_dict(user_stats.get("views"))
-    likes = _as_dict(user_stats.get("likes"))
-
     connection = connect_db(db_path)
     init_db(connection)
     try:
@@ -229,15 +225,15 @@ def collect_snapshot(
                 run_id=run_id,
                 username=username,
                 total_photos=_as_int(user.get("total_photos")),
-                total_likes=_as_int(user.get("total_likes")),
+                total_likes=None,
                 downloads_total=_as_int(downloads.get("total")),
                 views_total=_as_int(views.get("total")),
-                likes_total=_as_int(likes.get("total")),
+                likes_total=None,
                 downloads_change_30d=_as_int(
                     _as_dict(downloads.get("historical")).get("change")
                 ),
                 views_change_30d=_as_int(_as_dict(views.get("historical")).get("change")),
-                likes_change_30d=_as_int(_as_dict(likes.get("historical")).get("change")),
+                likes_change_30d=None,
                 raw_json={"user": user, "statistics": user_stats},
             )
 

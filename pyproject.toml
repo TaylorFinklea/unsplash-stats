@@ -4,7 +4,11 @@ version = "0.1.0"
 description = "Point-in-time Unsplash stats collector for SQLite + CSV"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "dash>=2.18.2",
+    "pandas>=2.2.3",
+    "plotly>=5.24.1",
+]
 
 [tool.uv]
 package = false

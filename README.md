@@ -7,13 +7,11 @@ It also exports CSV files so you can open the data in a spreadsheet immediately.
 
 - Account-level totals per run:
   - total photos
-  - total likes
   - total downloads
   - total views
 - Per-photo totals per run:
   - downloads
   - views
-  - likes
   - photo metadata (id, slug, description, created_at)
 
 Each run is timestamped (UTC), so you can compute trends and deltas over time.
@@ -76,6 +74,16 @@ Export CSVs from an existing database:
 uv run --env-file .env python -m unsplash_stats.cli export-csv --database data/unsplash_stats.sqlite --export-dir exports
 ```
 
+Run the dashboard:
+
+```bash
+uv run --env-file .env python -m unsplash_stats.dashboard --database data/unsplash_stats.sqlite --port 8050
+```
+
+In the UI, use `Collect Now` to run a fresh snapshot collection directly from the dashboard
+using your current `.env` credentials and rate-limit settings.
+Use the `Collection Progress` tab to monitor live API call counts and done percentage while the run is active.
+
 Use stricter throttling (50% of API limit):
 
 ```bash
@@ -118,4 +126,4 @@ Run every 6 hours via cron (safer when throttling heavily):
 - The collector uses official Unsplash API endpoints (more stable than scraping HTML).
 - Per-photo stats are taken from paginated user-photo responses (`stats=true`) to keep request count low.
 - Use `--max-photos`/`--max-pages` to shorten runs for smoke tests.
-- SQLite + CSV output is ready for a Streamlit dashboard in the next step.
+- Dash UI includes account totals, per-run growth, top movers, and per-photo trend drilldowns.
