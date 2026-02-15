@@ -77,12 +77,20 @@ uv run --env-file .env python -m unsplash_stats.cli export-csv --database data/u
 Run the dashboard:
 
 ```bash
-uv run --env-file .env python -m unsplash_stats.dashboard --database data/unsplash_stats.sqlite --port 8050
+uv run --env-file .env python -m unsplash_stats.dashboard
 ```
 
 In the UI, use `Collect Now` to run a fresh snapshot collection directly from the dashboard
 using your current `.env` credentials and rate-limit settings.
 Use the `Collection Progress` tab to monitor live API call counts and done percentage while the run is active.
+Photo previews are cached locally (default: `data/photo_cache`; override with `UNSPLASH_PHOTO_CACHE_DIR`).
+Startup pre-caches a small set of images (`UNSPLASH_DASHBOARD_IMAGE_CACHE_WARM_LIMIT`, default `6`).
+
+Run regression tests:
+
+```bash
+uv run --env-file .env python -m unittest discover -s tests -v
+```
 
 Use stricter throttling (50% of API limit):
 
@@ -126,4 +134,4 @@ Run every 6 hours via cron (safer when throttling heavily):
 - The collector uses official Unsplash API endpoints (more stable than scraping HTML).
 - Per-photo stats are taken from paginated user-photo responses (`stats=true`) to keep request count low.
 - Use `--max-photos`/`--max-pages` to shorten runs for smoke tests.
-- Dash UI includes account totals, per-run growth, top movers, and per-photo trend drilldowns.
+- Dash UI includes account totals, per-run growth, tracked/new photo trends, movers, momentum/efficiency scatter plots, and per-photo drilldowns.

@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import sqlite3
 import threading
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import plotly.express as px
-from dash import Dash, Input, Output, State, ctx, dcc, html
-from dash.dash_table import DataTable
+from dash import ALL, Dash, Input, Output, State, ctx, dcc, html, no_update
+from dash.exceptions import PreventUpdate
+from flask import abort, send_from_directory
 
 from .collector import collect_snapshot
 from .db import connect_db, init_db
@@ -40,7 +45,8 @@ SELECT
     p.photo_description,
     p.photo_created_at,
     p.downloads_total,
-    p.views_total
+    p.views_total,
+    p.raw_json
 FROM photo_stats_snapshots p
 JOIN collection_runs r ON r.id = p.run_id
 ORDER BY r.collected_at ASC, r.id ASC, p.photo_id ASC;
@@ -53,8 +59,10 @@ WITH ranked AS (
         p.photo_id,
         p.photo_slug,
         p.photo_description,
+        p.photo_created_at,
         p.downloads_total,
         p.views_total,
+        p.raw_json,
         r.collected_at,
         ROW_NUMBER() OVER (
             PARTITION BY p.photo_id
@@ -73,8 +81,10 @@ SELECT
     latest.photo_id,
     latest.photo_slug,
     latest.photo_description,
+    latest.photo_created_at,
     latest.downloads_total,
     latest.views_total,
+    latest.raw_json,
     latest.collected_at AS latest_collected_at,
     previous.collected_at AS previous_collected_at,
     latest.downloads_total - COALESCE(previous.downloads_total, latest.downloads_total)
@@ -109,6 +119,16 @@ def _env_float(name: str, default: float) -> float:
         return default
     try:
         return float(value)
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
     except ValueError:
         return default
 
@@ -163,6 +183,241 @@ def _photo_option_label(row: pd.Series) -> str:
     return base
 
 
+def _fmt_delta(value: Any) -> str:
+    if value is None:
+        return "-"
+    try:
+        ivalue = int(value)
+    except (TypeError, ValueError):
+        return "-"
+    if ivalue > 0:
+        return f"+{ivalue:,}"
+    return f"{ivalue:,}"
+
+
+def _extract_photo_url(raw_payload: Any) -> str | None:
+    payload = raw_payload
+    if isinstance(raw_payload, str):
+        raw_payload = raw_payload.strip()
+        if not raw_payload:
+            return None
+        try:
+            payload = json.loads(raw_payload)
+        except json.JSONDecodeError:
+            return None
+
+    if not isinstance(payload, dict):
+        return None
+    photo = payload.get("photo")
+    if not isinstance(photo, dict):
+        return None
+    urls = photo.get("urls")
+    if not isinstance(urls, dict):
+        return None
+
+    for key in ("small", "regular", "thumb", "full", "raw"):
+        value = urls.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _safe_file_token(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._")
+    if cleaned:
+        return cleaned
+    return "photo"
+
+
+def _photo_cache_filename(photo_id: str, image_url: str) -> str:
+    parsed = urllib.parse.urlparse(image_url)
+    suffix = Path(parsed.path).suffix.lower()
+    if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
+        suffix = ".jpg"
+    return f"{_safe_file_token(photo_id)}{suffix}"
+
+
+def _cache_photo_if_needed(cache_dir: Path, photo_id: str, image_url: str) -> str | None:
+    if not photo_id.strip() or not image_url.strip():
+        return None
+
+    filename = _photo_cache_filename(photo_id, image_url)
+    cache_path = cache_dir / filename
+    if cache_path.exists():
+        return filename
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    request = urllib.request.Request(
+        image_url,
+        headers={"User-Agent": "unsplash-stats-dashboard/0.1"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            body = response.read()
+    except Exception:
+        return None
+
+    tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+    try:
+        tmp_path.write_bytes(body)
+        tmp_path.replace(cache_path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+    return filename
+
+
+def _resolve_photo_src(
+    *,
+    cache_dir: Path,
+    photo_id: str,
+    raw_json_payload: Any,
+    route_prefix: str,
+) -> str | None:
+    remote_url = _extract_photo_url(raw_json_payload)
+    if not remote_url:
+        return None
+
+    cached_filename = _cache_photo_if_needed(cache_dir, photo_id, remote_url)
+    if cached_filename is not None:
+        return f"{route_prefix}/{urllib.parse.quote(cached_filename)}"
+    return remote_url
+
+
+def _photo_image_or_placeholder(src: str | None, label: str, *, height_px: int) -> html.Div:
+    if src:
+        return html.Div(
+            [
+                html.Img(
+                    src=src,
+                    alt=label,
+                    style={
+                        "width": "100%",
+                        "height": f"{height_px}px",
+                        "objectFit": "cover",
+                        "display": "block",
+                    },
+                )
+            ],
+            style={
+                "backgroundColor": "#e2e8f0",
+                "borderBottom": "1px solid #e2e8f0",
+            },
+        )
+
+    return html.Div(
+        f"No image available for {label}",
+        style={
+            "height": f"{height_px}px",
+            "display": "flex",
+            "alignItems": "center",
+            "justifyContent": "center",
+            "padding": "12px",
+            "color": "#64748b",
+            "backgroundColor": "#f1f5f9",
+            "borderBottom": "1px solid #e2e8f0",
+            "fontWeight": 600,
+            "textAlign": "center",
+        },
+    )
+
+
+def _build_selected_photo_preview(
+    row: pd.Series | None, image_src: str | None
+) -> html.Div:
+    if row is None:
+        return html.Div(
+            "Select a photo to preview it.",
+            style={"color": "#475569", "padding": "8px 2px"},
+        )
+
+    label = _photo_option_label(row)
+    return html.Div(
+        style={
+            "backgroundColor": "white",
+            "borderRadius": "14px",
+            "overflow": "hidden",
+            "boxShadow": "0 8px 20px rgba(15, 23, 42, 0.08)",
+            "marginBottom": "12px",
+        },
+        children=[
+            _photo_image_or_placeholder(image_src, label, height_px=320),
+            html.Div(
+                style={"padding": "12px 14px"},
+                children=[
+                    html.Div(label, style={"fontWeight": 700, "marginBottom": "8px"}),
+                    html.Div(
+                        f"Views: {_fmt_int(row.get('views_total'))} "
+                        f"({_fmt_delta(row.get('views_delta_since_previous'))})",
+                        style={"color": "#0f172a", "marginBottom": "4px"},
+                    ),
+                    html.Div(
+                        f"Downloads: {_fmt_int(row.get('downloads_total'))} "
+                        f"({_fmt_delta(row.get('downloads_delta_since_previous'))})",
+                        style={"color": "#0f172a", "marginBottom": "4px"},
+                    ),
+                    html.Div(
+                        f"Photo ID: {row.get('photo_id')}",
+                        style={"color": "#475569", "fontSize": "0.92rem"},
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+def _build_latest_photo_card(row: pd.Series, image_src: str | None) -> html.Div:
+    label = _photo_option_label(row)
+    photo_id = str(row.get("photo_id", "")).strip()
+    return html.Div(
+        id={"type": "photo-card", "photo_id": photo_id},
+        n_clicks=0,
+        style={
+            "backgroundColor": "white",
+            "borderRadius": "14px",
+            "overflow": "hidden",
+            "boxShadow": "0 8px 20px rgba(15, 23, 42, 0.08)",
+            "display": "flex",
+            "flexDirection": "column",
+            "cursor": "pointer",
+        },
+        children=[
+            _photo_image_or_placeholder(image_src, label, height_px=210),
+            html.Div(
+                style={"padding": "10px 12px"},
+                children=[
+                    html.Div(
+                        label,
+                        style={
+                            "fontWeight": 700,
+                            "fontSize": "0.98rem",
+                            "marginBottom": "6px",
+                            "lineHeight": "1.25",
+                        },
+                    ),
+                    html.Div(
+                        f"Views: {_fmt_int(row.get('views_total'))}",
+                        style={"color": "#0f172a", "marginBottom": "2px"},
+                    ),
+                    html.Div(
+                        f"Downloads: {_fmt_int(row.get('downloads_total'))}",
+                        style={"color": "#0f172a", "marginBottom": "2px"},
+                    ),
+                    html.Div(
+                        f"Delta Views: {_fmt_delta(row.get('views_delta_since_previous'))}",
+                        style={"color": "#334155", "fontSize": "0.92rem", "marginBottom": "2px"},
+                    ),
+                    html.Div(
+                        f"Delta Downloads: {_fmt_delta(row.get('downloads_delta_since_previous'))}",
+                        style={"color": "#334155", "fontSize": "0.92rem"},
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
 def _load_data(db_path: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     connection = sqlite3.connect(db_path)
     try:
@@ -200,7 +455,31 @@ def _load_data(db_path: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
         if col in photo_latest_df.columns:
             photo_latest_df[col] = pd.to_numeric(photo_latest_df[col], errors="coerce")
 
+    for frame in (photo_history_df, photo_latest_df):
+        if "raw_json" in frame.columns:
+            frame["photo_image_url"] = frame["raw_json"].map(_extract_photo_url)
+
     return user_df, photo_history_df, photo_latest_df
+
+
+def _extract_photo_id_from_click(click_data: Any) -> str | None:
+    if not isinstance(click_data, dict):
+        return None
+    points = click_data.get("points")
+    if not isinstance(points, list) or not points:
+        return None
+    first_point = points[0]
+    if not isinstance(first_point, dict):
+        return None
+    custom_data = first_point.get("customdata")
+    if isinstance(custom_data, list) and custom_data:
+        value = custom_data[0]
+    else:
+        value = custom_data
+    if value is None:
+        return None
+    photo_id = str(value).strip()
+    return photo_id or None
 
 
 def _build_layout(db_path: Path) -> html.Div:
@@ -285,7 +564,12 @@ def _build_layout(db_path: Path) -> html.Div:
                 style={"color": "#334155", "marginBottom": "16px", "fontSize": "0.95rem"},
             ),
             dcc.Store(id="collection-refresh-token", data=0),
-            dcc.Interval(id="progress-interval", interval=1000, n_intervals=0),
+            dcc.Interval(
+                id="progress-interval",
+                interval=1000,
+                n_intervals=0,
+                disabled=True,
+            ),
             dcc.Tabs(
                 id="main-tab",
                 value="dashboard",
@@ -314,12 +598,14 @@ def _build_layout(db_path: Path) -> html.Div:
                     html.Div(
                         style={
                             "display": "grid",
-                            "gridTemplateColumns": "repeat(auto-fit, minmax(300px, 1fr))",
-                            "gap": "16px",
+                            "gridTemplateColumns": "repeat(auto-fit, minmax(min(100%, 520px), 1fr))",
+                            "gap": "20px",
                         },
                         children=[
-                            dcc.Graph(id="account-totals-graph"),
-                            dcc.Graph(id="account-growth-graph"),
+                            dcc.Graph(id="account-totals-graph", style={"height": "430px"}),
+                            dcc.Graph(id="account-growth-graph", style={"height": "430px"}),
+                            dcc.Graph(id="tracked-photos-graph", style={"height": "430px"}),
+                            dcc.Graph(id="new-photos-per-run-graph", style={"height": "430px"}),
                         ],
                     ),
                     html.H2(
@@ -369,35 +655,33 @@ def _build_layout(db_path: Path) -> html.Div:
                         ],
                     ),
                     html.Div(
+                        id="selected-photo-preview",
+                        style={"marginBottom": "12px"},
+                    ),
+                    html.Div(
                         style={
                             "display": "grid",
-                            "gridTemplateColumns": "repeat(auto-fit, minmax(320px, 1fr))",
-                            "gap": "16px",
+                            "gridTemplateColumns": "repeat(auto-fit, minmax(min(100%, 520px), 1fr))",
+                            "gap": "20px",
                         },
                         children=[
-                            dcc.Graph(id="photo-trend-graph"),
-                            dcc.Graph(id="top-movers-graph"),
+                            dcc.Graph(id="photo-trend-graph", style={"height": "460px"}),
+                            dcc.Graph(id="top-movers-graph", style={"height": "460px"}),
+                            dcc.Graph(id="momentum-scatter-graph", style={"height": "460px"}),
+                            dcc.Graph(id="efficiency-scatter-graph", style={"height": "460px"}),
                         ],
                     ),
                     html.H3(
                         "Latest Snapshot by Photo",
                         style={"marginTop": "20px", "marginBottom": "10px", "fontSize": "1.2rem"},
                     ),
-                    DataTable(
-                        id="latest-photo-table",
-                        page_size=12,
-                        style_table={"overflowX": "auto"},
-                        style_cell={
-                            "textAlign": "left",
-                            "padding": "8px",
-                            "fontFamily": "'IBM Plex Sans', sans-serif",
+                    html.Div(
+                        id="latest-photo-cards",
+                        style={
+                            "display": "grid",
+                            "gridTemplateColumns": "repeat(auto-fit, minmax(250px, 1fr))",
+                            "gap": "12px",
                         },
-                        style_header={
-                            "backgroundColor": "#e2e8f0",
-                            "fontWeight": 700,
-                            "color": "#0f172a",
-                        },
-                        style_data={"backgroundColor": "#ffffff"},
                     ),
                 ],
             ),
@@ -479,6 +763,20 @@ def create_app(db_path: Path) -> Dash:
     )
     app.title = "Unsplash Stats"
     app.layout = _build_layout(db_path)
+    photo_cache_dir = Path(
+        os.getenv("UNSPLASH_PHOTO_CACHE_DIR", str(db_path.parent / "photo_cache"))
+    )
+    photo_route_prefix = "/photo-cache"
+
+    @app.server.route(f"{photo_route_prefix}/<path:filename>")
+    def serve_photo_cache(filename: str):
+        safe_root = photo_cache_dir.resolve()
+        requested = (safe_root / filename).resolve()
+        if safe_root not in requested.parents:
+            abort(404)
+        if not requested.is_file():
+            abort(404)
+        return send_from_directory(str(safe_root), requested.name)
 
     state_lock = threading.Lock()
     worker_ref: dict[str, threading.Thread | None] = {"thread": None}
@@ -802,10 +1100,15 @@ def create_app(db_path: Path) -> Dash:
         }
 
         state_refresh_token = state.get("refresh_token")
+        current_refresh_token_int = int(current_refresh_token or 0)
         if isinstance(state_refresh_token, int):
-            next_refresh_token = max(int(current_refresh_token or 0), state_refresh_token)
+            next_refresh_token = max(current_refresh_token_int, state_refresh_token)
         else:
-            next_refresh_token = int(current_refresh_token or 0)
+            next_refresh_token = current_refresh_token_int
+        if next_refresh_token == current_refresh_token_int:
+            refresh_token_output: int | Any = no_update
+        else:
+            refresh_token_output = next_refresh_token
 
         return (
             action_status,
@@ -817,8 +1120,68 @@ def create_app(db_path: Path) -> Dash:
             progress_calls,
             progress_endpoint,
             progress_updated,
-            next_refresh_token,
+            refresh_token_output,
         )
+
+    @app.callback(
+        Output("progress-interval", "disabled"),
+        Input("collect-button", "disabled"),
+    )
+    def set_progress_interval_disabled(collect_button_disabled: bool | None) -> bool:
+        running = bool(collect_button_disabled)
+        return not running
+
+    @app.callback(
+        Output("photo-dropdown", "value", allow_duplicate=True),
+        Input("top-movers-graph", "clickData"),
+        Input("momentum-scatter-graph", "clickData"),
+        Input("efficiency-scatter-graph", "clickData"),
+        State("photo-dropdown", "value"),
+        prevent_initial_call=True,
+    )
+    def select_photo_from_graph_click(
+        movers_click: dict[str, Any] | None,
+        momentum_click: dict[str, Any] | None,
+        efficiency_click: dict[str, Any] | None,
+        current_photo_id: str | None,
+    ) -> str:
+        click_by_graph = {
+            "top-movers-graph": movers_click,
+            "momentum-scatter-graph": momentum_click,
+            "efficiency-scatter-graph": efficiency_click,
+        }
+        click_data = click_by_graph.get(str(ctx.triggered_id))
+        photo_id = _extract_photo_id_from_click(click_data)
+        if not photo_id or photo_id == current_photo_id:
+            raise PreventUpdate
+        return photo_id
+
+    @app.callback(
+        Output("photo-dropdown", "value", allow_duplicate=True),
+        Input({"type": "photo-card", "photo_id": ALL}, "n_clicks"),
+        State("photo-dropdown", "value"),
+        prevent_initial_call=True,
+    )
+    def select_photo_from_card_click(
+        _card_clicks: list[int],
+        current_photo_id: str | None,
+    ) -> str:
+        triggered = ctx.triggered_id
+        if not isinstance(triggered, dict):
+            raise PreventUpdate
+        if triggered.get("type") != "photo-card":
+            raise PreventUpdate
+        try:
+            triggered_value = ctx.triggered[0].get("value")
+            click_count = int(triggered_value or 0)
+        except Exception:
+            click_count = 0
+        if click_count <= 0:
+            raise PreventUpdate
+        photo_id = str(triggered.get("photo_id", "")).strip()
+        if not photo_id or photo_id == current_photo_id:
+            raise PreventUpdate
+        return photo_id
 
     @app.callback(
         Output("run-meta", "children"),
@@ -827,12 +1190,16 @@ def create_app(db_path: Path) -> Dash:
         Output("kpi-photos", "children"),
         Output("account-totals-graph", "figure"),
         Output("account-growth-graph", "figure"),
+        Output("tracked-photos-graph", "figure"),
+        Output("new-photos-per-run-graph", "figure"),
         Output("photo-trend-graph", "figure"),
         Output("top-movers-graph", "figure"),
+        Output("momentum-scatter-graph", "figure"),
+        Output("efficiency-scatter-graph", "figure"),
         Output("photo-dropdown", "options"),
         Output("photo-dropdown", "value"),
-        Output("latest-photo-table", "data"),
-        Output("latest-photo-table", "columns"),
+        Output("selected-photo-preview", "children"),
+        Output("latest-photo-cards", "children"),
         Input("refresh-button", "n_clicks"),
         Input("collection-refresh-token", "data"),
         Input("metric-dropdown", "value"),
@@ -858,10 +1225,19 @@ def create_app(db_path: Path) -> Dash:
                 empty,
                 empty,
                 empty,
+                empty,
+                empty,
+                empty,
+                empty,
                 [],
                 None,
-                [],
-                [],
+                _build_selected_photo_preview(None, None),
+                [
+                    html.Div(
+                        "No photos available yet.",
+                        style={"color": "#475569", "padding": "6px"},
+                    )
+                ],
             )
 
         latest_user = user_df.iloc[-1]
@@ -931,6 +1307,51 @@ def create_app(db_path: Path) -> Dash:
             yaxis_title="Delta vs Previous Run",
         )
 
+        tracked_photos_source = user_df[["collected_at", "total_photos"]].copy()
+        tracked_photos_source["total_photos"] = pd.to_numeric(
+            tracked_photos_source["total_photos"], errors="coerce"
+        )
+        if tracked_photos_source["total_photos"].dropna().empty:
+            tracked_photos_fig = _empty_figure(
+                "Tracked Photos Over Time", "No tracked photo totals available yet."
+            )
+        else:
+            tracked_photos_fig = px.line(
+                tracked_photos_source,
+                x="collected_at",
+                y="total_photos",
+                markers=True,
+                title="Tracked Photos Over Time",
+                color_discrete_sequence=["#0284c7"],
+            )
+            tracked_photos_fig.update_layout(
+                template="plotly_white",
+                showlegend=False,
+                margin={"l": 24, "r": 16, "t": 56, "b": 24},
+                xaxis_title="Collected At",
+                yaxis_title="Tracked Photos",
+            )
+            tracked_photos_fig.update_traces(connectgaps=False)
+
+        new_photos_source = tracked_photos_source.copy()
+        new_photos_source["new_photos"] = (
+            new_photos_source["total_photos"].diff().fillna(0).clip(lower=0)
+        )
+        new_photos_fig = px.bar(
+            new_photos_source,
+            x="collected_at",
+            y="new_photos",
+            title="New Photos Added Per Run",
+            color_discrete_sequence=["#f97316"],
+        )
+        new_photos_fig.update_layout(
+            template="plotly_white",
+            showlegend=False,
+            margin={"l": 24, "r": 16, "t": 56, "b": 24},
+            xaxis_title="Collected At",
+            yaxis_title="New Photos",
+        )
+
         photo_options: list[dict[str, str]] = []
         for _, row in photo_latest_df.iterrows():
             photo_options.append(
@@ -973,60 +1394,185 @@ def create_app(db_path: Path) -> Dash:
         delta_col = DELTA_COLUMNS.get(metric, "views_delta_since_previous")
         metric_label = METRIC_LABELS.get(metric, metric)
         movers_df = photo_latest_df.copy()
-        movers_df[delta_col] = movers_df[delta_col].fillna(0)
+        movers_df[delta_col] = pd.to_numeric(movers_df[delta_col], errors="coerce").fillna(0)
         movers_df["photo_label"] = movers_df.apply(_photo_option_label, axis=1)
-        movers_df = movers_df.sort_values(delta_col, ascending=False).head(15)
+        movers_df["direction"] = movers_df[delta_col].apply(
+            lambda val: "Gainer" if val >= 0 else "Decliner"
+        )
+        top_gainers = movers_df.sort_values(delta_col, ascending=False).head(8)
+        top_decliners = movers_df.sort_values(delta_col, ascending=True).head(8)
+        movers_display = pd.concat([top_decliners, top_gainers], ignore_index=True)
+        movers_display = movers_display.drop_duplicates(subset=["photo_id"], keep="last")
+        movers_display = movers_display.sort_values(delta_col, ascending=True)
         top_movers_fig = px.bar(
-            movers_df,
-            x="photo_label",
-            y=delta_col,
-            title=f"Top Movers by {metric_label} (Latest vs Previous Run)",
-            color=delta_col,
-            color_continuous_scale="Tealrose",
+            movers_display,
+            x=delta_col,
+            y="photo_label",
+            title=f"Biggest Movers by {metric_label} (Latest vs Previous Run)",
+            color="direction",
+            orientation="h",
+            custom_data=["photo_id"],
+            color_discrete_map={"Gainer": "#16a34a", "Decliner": "#dc2626"},
         )
         top_movers_fig.update_layout(
             template="plotly_white",
-            margin={"l": 24, "r": 16, "t": 56, "b": 90},
-            coloraxis_showscale=False,
-            xaxis_title="Photo",
-            yaxis_title=f"{metric_label} Delta",
+            margin={"l": 24, "r": 16, "t": 56, "b": 24},
+            legend_title_text="",
+            xaxis_title=f"{metric_label} Delta",
+            yaxis_title="Photo",
         )
-        top_movers_fig.update_xaxes(tickangle=-35)
+        top_movers_fig.update_traces(marker_line_width=0, hovertemplate=None)
 
-        table_df = photo_latest_df.copy()
-        table_df["photo_label"] = table_df.apply(_photo_option_label, axis=1)
-        table_df = table_df[
-            [
-                "photo_label",
-                "views_total",
-                "downloads_total",
-                "views_delta_since_previous",
-                "downloads_delta_since_previous",
-            ]
-        ].rename(
-            columns={
-                "photo_label": "photo",
-                "views_total": "views",
-                "downloads_total": "downloads",
-                "views_delta_since_previous": "delta_views",
-                "downloads_delta_since_previous": "delta_downloads",
-            }
+        momentum_df = photo_latest_df.copy()
+        momentum_df["photo_label"] = momentum_df.apply(_photo_option_label, axis=1)
+        momentum_df[metric] = pd.to_numeric(momentum_df[metric], errors="coerce").fillna(0)
+        momentum_df[delta_col] = pd.to_numeric(momentum_df[delta_col], errors="coerce").fillna(0)
+        other_metric = "downloads_total" if metric == "views_total" else "views_total"
+        momentum_df[other_metric] = pd.to_numeric(
+            momentum_df[other_metric], errors="coerce"
+        ).fillna(0)
+        momentum_df["bubble_size"] = (momentum_df[other_metric] + 1).pow(0.5)
+        momentum_df = momentum_df.sort_values(delta_col, ascending=False).head(120)
+        momentum_fig = px.scatter(
+            momentum_df,
+            x=metric,
+            y=delta_col,
+            size="bubble_size",
+            color=delta_col,
+            color_continuous_scale="RdYlGn",
+            custom_data=["photo_id"],
+            hover_name="photo_label",
+            hover_data={
+                metric: ":,.0f",
+                delta_col: ":,.0f",
+                other_metric: ":,.0f",
+                "bubble_size": False,
+            },
+            title=f"Momentum vs Reach ({metric_label})",
         )
-        table_df = table_df.fillna(0)
-        for col in [
-            "views",
-            "downloads",
-            "delta_views",
-            "delta_downloads",
-        ]:
-            table_df[col] = table_df[col].astype(int)
-        table_columns = [
-            {"name": "Photo", "id": "photo"},
-            {"name": "Views", "id": "views"},
-            {"name": "Downloads", "id": "downloads"},
-            {"name": "Delta Views", "id": "delta_views"},
-            {"name": "Delta Downloads", "id": "delta_downloads"},
+        momentum_fig.update_layout(
+            template="plotly_white",
+            margin={"l": 24, "r": 16, "t": 56, "b": 24},
+            coloraxis_showscale=False,
+            xaxis_title=f"Current {metric_label}",
+            yaxis_title=f"{metric_label} Delta (Latest vs Previous)",
+        )
+        momentum_fig.update_traces(
+            marker={"sizemin": 5, "line": {"width": 0}},
+            hovertemplate=None,
+        )
+
+        efficiency_df = photo_latest_df.copy()
+        efficiency_df["photo_label"] = efficiency_df.apply(_photo_option_label, axis=1)
+        efficiency_df["views_total"] = pd.to_numeric(
+            efficiency_df["views_total"], errors="coerce"
+        ).fillna(0)
+        efficiency_df["downloads_total"] = pd.to_numeric(
+            efficiency_df["downloads_total"], errors="coerce"
+        ).fillna(0)
+        efficiency_df["downloads_delta_since_previous"] = pd.to_numeric(
+            efficiency_df["downloads_delta_since_previous"], errors="coerce"
+        ).fillna(0)
+        efficiency_df["views_delta_since_previous"] = pd.to_numeric(
+            efficiency_df["views_delta_since_previous"], errors="coerce"
+        ).fillna(0)
+        safe_views = efficiency_df["views_total"].replace(0, pd.NA)
+        efficiency_df["download_rate_pct"] = (
+            (efficiency_df["downloads_total"] / safe_views) * 100.0
+        ).fillna(0.0)
+        efficiency_df = efficiency_df.sort_values("views_total", ascending=False).head(120)
+        efficiency_fig = px.scatter(
+            efficiency_df,
+            x="views_total",
+            y="downloads_total",
+            color="download_rate_pct",
+            size="views_total",
+            custom_data=["photo_id"],
+            hover_name="photo_label",
+            hover_data={
+                "views_total": ":,.0f",
+                "downloads_total": ":,.0f",
+                "download_rate_pct": ":.2f",
+                "views_delta_since_previous": ":,.0f",
+                "downloads_delta_since_previous": ":,.0f",
+            },
+            color_continuous_scale="Turbo",
+            title="Download Efficiency by Photo",
+        )
+        efficiency_fig.update_layout(
+            template="plotly_white",
+            margin={"l": 24, "r": 16, "t": 56, "b": 24},
+            coloraxis_colorbar={"title": "Download Rate %"},
+            xaxis_title="Views",
+            yaxis_title="Downloads",
+        )
+        efficiency_fig.update_traces(
+            marker={"sizemin": 5, "line": {"width": 0}},
+            hovertemplate=None,
+        )
+
+        latest_photo_with_images = photo_latest_df.copy()
+        latest_photo_with_images["photo_id"] = latest_photo_with_images["photo_id"].astype(str)
+        latest_photo_with_images = latest_photo_with_images.sort_values(
+            "views_total", ascending=False
+        )
+
+        cache_warm_limit = max(
+            0, _env_int("UNSPLASH_DASHBOARD_IMAGE_CACHE_WARM_LIMIT", 6)
+        )
+        cache_candidate_photo_ids = {
+            str(pid)
+            for pid in latest_photo_with_images.head(cache_warm_limit)["photo_id"].tolist()
+        }
+        if selected_photo_id:
+            cache_candidate_photo_ids.add(selected_photo_id)
+
+        image_src_by_photo_id: dict[str, str | None] = {}
+        for _, row in latest_photo_with_images.iterrows():
+            photo_id = str(row.get("photo_id", "")).strip()
+            if not photo_id:
+                continue
+            raw_payload = row.get("raw_json")
+            if photo_id in cache_candidate_photo_ids:
+                image_src_by_photo_id[photo_id] = _resolve_photo_src(
+                    cache_dir=photo_cache_dir,
+                    photo_id=photo_id,
+                    raw_json_payload=raw_payload,
+                    route_prefix=photo_route_prefix,
+                )
+            else:
+                image_src_by_photo_id[photo_id] = _extract_photo_url(raw_payload)
+
+        selected_row: pd.Series | None = None
+        selected_image_src: str | None = None
+        if selected_photo_id:
+            selected_match = latest_photo_with_images[
+                latest_photo_with_images["photo_id"] == selected_photo_id
+            ]
+            if not selected_match.empty:
+                selected_row = selected_match.iloc[0]
+                selected_image_src = image_src_by_photo_id.get(selected_photo_id)
+
+        if selected_row is None and not latest_photo_with_images.empty:
+            selected_row = latest_photo_with_images.iloc[0]
+            selected_image_src = image_src_by_photo_id.get(str(selected_row["photo_id"]))
+
+        selected_photo_preview = _build_selected_photo_preview(selected_row, selected_image_src)
+
+        latest_photo_cards = [
+            _build_latest_photo_card(
+                row,
+                image_src_by_photo_id.get(str(row.get("photo_id", ""))),
+            )
+            for _, row in latest_photo_with_images.iterrows()
         ]
+        if not latest_photo_cards:
+            latest_photo_cards = [
+                html.Div(
+                    "No photos available yet.",
+                    style={"color": "#475569", "padding": "6px"},
+                )
+            ]
 
         return (
             f"Runs: {runs_count} | Last collected: {latest_timestamp}",
@@ -1035,12 +1581,16 @@ def create_app(db_path: Path) -> Dash:
             _fmt_int(latest_user.get("total_photos")),
             account_totals_fig,
             account_growth_fig,
+            tracked_photos_fig,
+            new_photos_fig,
             photo_trend_fig,
             top_movers_fig,
+            momentum_fig,
+            efficiency_fig,
             photo_options,
             selected_photo_id,
-            table_df.to_dict("records"),
-            table_columns,
+            selected_photo_preview,
+            latest_photo_cards,
         )
 
     return app
