@@ -1,0 +1,4 @@
+build_from:
+  aarch64: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+  amd64: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+

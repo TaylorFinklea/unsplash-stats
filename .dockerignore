@@ -1,0 +1,13 @@
+.git
+.gitignore
+.venv
+.uv-cache
+__pycache__/
+*.py[cod]
+*.sqlite
+*.sqlite-journal
+.env
+data/
+exports/
+tests/
+cron.log

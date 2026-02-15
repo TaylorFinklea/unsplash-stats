@@ -1,0 +1,20 @@
+services:
+  unsplash-stats:
+    build: .
+    container_name: unsplash-stats
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      UNSPLASH_DATABASE: /app/data/unsplash_stats.sqlite
+      UNSPLASH_EXPORT_DIR: /app/exports
+      UNSPLASH_PHOTO_CACHE_DIR: /app/data/photo_cache
+    ports:
+      - "8050:8050"
+    volumes:
+      - unsplash_stats_data:/app/data
+      - unsplash_stats_exports:/app/exports
+
+volumes:
+  unsplash_stats_data:
+  unsplash_stats_exports:

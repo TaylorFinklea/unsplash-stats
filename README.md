@@ -92,6 +92,66 @@ Run regression tests:
 uv run --env-file .env python -m unittest discover -s tests -v
 ```
 
+## Deploy on Docker
+
+Build the image:
+
+```bash
+docker build -t unsplash-stats:latest .
+```
+
+Run on a Docker host (persists DB, exports, and photo cache in named volumes):
+
+```bash
+docker run -d \
+  --name unsplash-stats \
+  --restart unless-stopped \
+  --env-file .env \
+  -e UNSPLASH_DATABASE=/app/data/unsplash_stats.sqlite \
+  -e UNSPLASH_EXPORT_DIR=/app/exports \
+  -e UNSPLASH_PHOTO_CACHE_DIR=/app/data/photo_cache \
+  -p 8050:8050 \
+  -v unsplash_stats_data:/app/data \
+  -v unsplash_stats_exports:/app/exports \
+  unsplash-stats:latest
+```
+
+Then open: [http://localhost:8050](http://localhost:8050)
+
+Run with Docker Compose:
+
+```bash
+docker compose up -d --build
+```
+
+Stop Compose deployment:
+
+```bash
+docker compose down
+```
+
+## Home Assistant Add-on
+
+This repo now includes a Home Assistant add-on package at:
+
+- `homeassistant-addon/unsplash_stats_dashboard`
+
+To add it to Home Assistant Supervisor:
+
+1. Add this repository in **Settings -> Add-ons -> Add-on Store -> Repositories**:
+   - `https://github.com/tfinklea/unsplash-stats`
+2. Install **Unsplash Stats Dashboard**.
+3. Set add-on config options (minimum required):
+   - `unsplash_access_key`
+   - `unsplash_username`
+4. Start the add-on and open **Web UI**.
+
+The add-on stores runtime data in `/data` inside the add-on volume:
+
+- `/data/unsplash_stats.sqlite`
+- `/data/exports`
+- `/data/photo_cache`
+
 Use stricter throttling (50% of API limit):
 
 ```bash
