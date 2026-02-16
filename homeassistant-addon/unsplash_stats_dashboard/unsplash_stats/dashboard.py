@@ -16,7 +16,7 @@ import pandas as pd
 import plotly.express as px
 from dash import ALL, Dash, Input, Output, State, ctx, dcc, html, no_update
 from dash.exceptions import PreventUpdate
-from flask import abort, send_from_directory
+from flask import abort, redirect, send_from_directory
 
 from .collector import collect_snapshot
 from .db import connect_db, init_db
@@ -792,6 +792,12 @@ def create_app(
     )
     app.title = "Unsplash Stats"
     app.layout = _build_layout(db_path)
+
+    if dash_prefix != "/":
+        @app.server.route("/")
+        def redirect_root_to_dash_prefix():
+            return redirect(dash_prefix, code=302)
+
     photo_cache_dir = Path(
         os.getenv("UNSPLASH_PHOTO_CACHE_DIR", str(db_path.parent / "photo_cache"))
     )

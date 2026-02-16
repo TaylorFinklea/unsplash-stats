@@ -133,6 +133,12 @@ class DashboardCallbackRegressionTests(unittest.TestCase):
         client = app.server.test_client()
         response = client.get("/api/hassio_ingress/demo-token/")
         self.assertEqual(response.status_code, 200)
+        root_response = client.get("/")
+        self.assertEqual(root_response.status_code, 302)
+        self.assertEqual(
+            root_response.headers.get("Location"),
+            "/api/hassio_ingress/demo-token/",
+        )
 
 
 if __name__ == "__main__":

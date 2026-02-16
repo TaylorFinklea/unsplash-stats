@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2
+
+- Fix Home Assistant "Open Web UI" 404 by redirecting `/` to the active Dash ingress prefix.
+- Remove static `webui` URL so Home Assistant uses ingress routing for the add-on UI.
+
 ## 0.1.1
 
 - Fix Home Assistant ingress loading issue by adding Dash path-prefix support.

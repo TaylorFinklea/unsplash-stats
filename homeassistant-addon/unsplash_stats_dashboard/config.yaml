@@ -1,5 +1,5 @@
 name: Unsplash Stats Dashboard
-version: "0.1.1"
+version: "0.1.2"
 slug: unsplash_stats_dashboard
 description: Collect and visualize point-in-time Unsplash stats in Home Assistant
 url: https://github.com/tfinklea/unsplash-stats/tree/main/homeassistant-addon/unsplash_stats_dashboard
@@ -15,7 +15,6 @@ hassio_api: true
 hassio_role: default
 panel_icon: mdi:chart-line
 panel_title: Unsplash Stats
-webui: http://[HOST]:[PORT:8099]
 ports:
   8099/tcp: null
 options:
