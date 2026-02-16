@@ -1,5 +1,5 @@
 name: Unsplash Stats Dashboard
-version: "0.1.0"
+version: "0.1.1"
 slug: unsplash_stats_dashboard
 description: Collect and visualize point-in-time Unsplash stats in Home Assistant
 url: https://github.com/tfinklea/unsplash-stats/tree/main/homeassistant-addon/unsplash_stats_dashboard
