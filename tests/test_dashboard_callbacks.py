@@ -118,6 +118,22 @@ class DashboardCallbackRegressionTests(unittest.TestCase):
         status_code, _body = self._post_old_progress_signature()
         self.assertIn(status_code, (200, 204))
 
+    def test_create_app_normalizes_ingress_path_prefix(self) -> None:
+        ingress_prefix = "api/hassio_ingress/demo-token"
+        app = create_app(self.db_path, requests_pathname_prefix=ingress_prefix)
+        self.assertEqual(
+            app.config.requests_pathname_prefix,
+            "/api/hassio_ingress/demo-token/",
+        )
+        self.assertEqual(
+            app.config.routes_pathname_prefix,
+            "/api/hassio_ingress/demo-token/",
+        )
+
+        client = app.server.test_client()
+        response = client.get("/api/hassio_ingress/demo-token/")
+        self.assertEqual(response.status_code, 200)
+
 
 if __name__ == "__main__":
     unittest.main()

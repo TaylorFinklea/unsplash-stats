@@ -133,6 +133,25 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _normalize_path_prefix(value: str | None) -> str:
+    if value is None:
+        return "/"
+
+    prefix = value.strip()
+    if not prefix:
+        return "/"
+
+    if "://" in prefix:
+        parsed = urllib.parse.urlparse(prefix)
+        prefix = parsed.path or "/"
+
+    if not prefix.startswith("/"):
+        prefix = f"/{prefix}"
+    if not prefix.endswith("/"):
+        prefix = f"{prefix}/"
+    return prefix
+
+
 def _utc_now_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
@@ -754,9 +773,19 @@ def _kpi_card(title: str, value_id: str) -> html.Div:
     )
 
 
-def create_app(db_path: Path) -> Dash:
+def create_app(
+    db_path: Path,
+    requests_pathname_prefix: str | None = None,
+) -> Dash:
+    dash_prefix = _normalize_path_prefix(
+        requests_pathname_prefix
+        or os.getenv("UNSPLASH_DASH_REQUESTS_PATHNAME_PREFIX")
+        or os.getenv("DASH_REQUESTS_PATHNAME_PREFIX")
+    )
     app = Dash(
         __name__,
+        requests_pathname_prefix=dash_prefix,
+        routes_pathname_prefix=dash_prefix,
         external_stylesheets=[
             "https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Sans:wght@400;500;700&display=swap"
         ],
@@ -766,7 +795,7 @@ def create_app(db_path: Path) -> Dash:
     photo_cache_dir = Path(
         os.getenv("UNSPLASH_PHOTO_CACHE_DIR", str(db_path.parent / "photo_cache"))
     )
-    photo_route_prefix = "/photo-cache"
+    photo_route_prefix = app.get_relative_path("/photo-cache").rstrip("/")
 
     @app.server.route(f"{photo_route_prefix}/<path:filename>")
     def serve_photo_cache(filename: str):
@@ -1608,6 +1637,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind the server.")
     parser.add_argument("--port", type=int, default=8050, help="Port to bind the server.")
     parser.add_argument(
+        "--requests-pathname-prefix",
+        default=os.getenv("UNSPLASH_DASH_REQUESTS_PATHNAME_PREFIX"),
+        help=(
+            "Optional URL path prefix (for reverse proxy/ingress), "
+            "for example /api/hassio_ingress/abc123/."
+        ),
+    )
+    parser.add_argument(
         "--debug", action="store_true", help="Run Dash in debug mode."
     )
     return parser.parse_args()
@@ -1616,7 +1653,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     db_path = Path(args.database)
-    app = create_app(db_path)
+    app = create_app(
+        db_path,
+        requests_pathname_prefix=args.requests_pathname_prefix,
+    )
     app.run(host=args.host, port=args.port, debug=args.debug)
     return 0
 

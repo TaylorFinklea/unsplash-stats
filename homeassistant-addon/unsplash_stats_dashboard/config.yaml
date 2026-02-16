@@ -10,6 +10,9 @@ startup: application
 init: false
 ingress: true
 ingress_port: 8099
+ingress_stream: true
+hassio_api: true
+hassio_role: default
 panel_icon: mdi:chart-line
 panel_title: Unsplash Stats
 webui: http://[HOST]:[PORT:8099]
@@ -35,4 +38,3 @@ schema:
   database_path: str
   export_dir: str
   photo_cache_dir: str
-

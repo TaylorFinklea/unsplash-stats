@@ -8,6 +8,8 @@ import json
 import os
 import pathlib
 import sys
+import urllib.error
+import urllib.request
 
 
 OPTIONS_PATH = pathlib.Path("/data/options.json")
@@ -74,6 +76,60 @@ def get_int(
     return value
 
 
+def normalize_prefix(value: str | None) -> str | None:
+    if value is None:
+        return None
+    prefix = str(value).strip()
+    if not prefix:
+        return None
+    if "://" in prefix:
+        try:
+            from urllib.parse import urlparse
+
+            prefix = urlparse(prefix).path or "/"
+        except Exception:
+            return None
+    if not prefix.startswith("/"):
+        prefix = f"/{prefix}"
+    if not prefix.endswith("/"):
+        prefix = f"{prefix}/"
+    return prefix
+
+
+def detect_ingress_prefix() -> str | None:
+    direct = normalize_prefix(os.getenv("UNSPLASH_DASH_REQUESTS_PATHNAME_PREFIX"))
+    if direct:
+        return direct
+
+    ingress_entry_env = normalize_prefix(os.getenv("INGRESS_ENTRY"))
+    if ingress_entry_env:
+        return ingress_entry_env
+
+    supervisor_token = os.getenv("SUPERVISOR_TOKEN", "").strip()
+    if not supervisor_token:
+        return None
+
+    request = urllib.request.Request(
+        "http://supervisor/addons/self/info",
+        headers={
+            "Authorization": f"Bearer {supervisor_token}",
+            "Content-Type": "application/json",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        print(f"WARN: Failed to fetch ingress info from supervisor: {exc}", flush=True)
+        return None
+
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None
+    return normalize_prefix(data.get("ingress_entry"))
+
+
 options = load_options()
 
 access_key = get_str(options, "unsplash_access_key", "")
@@ -129,6 +185,10 @@ os.environ["UNSPLASH_DATABASE"] = database_path
 os.environ["UNSPLASH_EXPORT_DIR"] = export_dir
 os.environ["UNSPLASH_PHOTO_CACHE_DIR"] = photo_cache_dir
 
+ingress_prefix = detect_ingress_prefix()
+if ingress_prefix:
+    os.environ["UNSPLASH_DASH_REQUESTS_PATHNAME_PREFIX"] = ingress_prefix
+
 command = [
     "python",
     "-m",
@@ -147,6 +207,7 @@ command = [
 print("Starting Unsplash Stats Dashboard add-on...", flush=True)
 print(f"Configured Unsplash username: @{username}", flush=True)
 print(f"Database path: {database_path}", flush=True)
+if ingress_prefix:
+    print(f"Dash requests path prefix: {ingress_prefix}", flush=True)
 os.execvp(command[0], command)
 PY
-
