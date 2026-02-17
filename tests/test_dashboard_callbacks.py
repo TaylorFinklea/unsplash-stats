@@ -141,6 +141,25 @@ class DashboardCallbackRegressionTests(unittest.TestCase):
         layout_response = client.get("/_dash-layout")
         self.assertEqual(layout_response.status_code, 200)
 
+    def test_download_movers_callback_payload_does_not_500(self) -> None:
+        self.assertIn("download-movers-graph.figure", self.app.callback_map)
+        payload = {
+            "output": "download-movers-graph.figure",
+            "outputs": {"id": "download-movers-graph", "property": "figure"},
+            "inputs": [
+                {"id": "refresh-button", "property": "n_clicks", "value": 0},
+                {"id": "collection-refresh-token", "property": "data", "value": 0},
+            ],
+            "state": [],
+            "changedPropIds": ["refresh-button.n_clicks"],
+        }
+        response = self.client.post(
+            "/_dash-update-component",
+            data=json.dumps(payload),
+            content_type="application/json",
+        )
+        self.assertIn(response.status_code, (200, 204))
+
 
 if __name__ == "__main__":
     unittest.main()

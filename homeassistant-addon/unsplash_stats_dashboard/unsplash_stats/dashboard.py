@@ -445,6 +445,50 @@ def _build_latest_photo_card(row: pd.Series, image_src: str | None) -> html.Div:
     )
 
 
+def _build_movers_figure(
+    photo_latest_df: pd.DataFrame,
+    *,
+    metric: str,
+    title: str,
+) -> Any:
+    if photo_latest_df.empty:
+        return _empty_figure(title, "No photo snapshots available yet.")
+
+    delta_col = DELTA_COLUMNS.get(metric, "views_delta_since_previous")
+    metric_label = METRIC_LABELS.get(metric, metric)
+    movers_df = photo_latest_df.copy()
+    movers_df[delta_col] = pd.to_numeric(movers_df[delta_col], errors="coerce").fillna(0)
+    movers_df["photo_label"] = movers_df.apply(_photo_option_label, axis=1)
+    movers_df["direction"] = movers_df[delta_col].apply(
+        lambda val: "Gainer" if val >= 0 else "Decliner"
+    )
+    top_gainers = movers_df.sort_values(delta_col, ascending=False).head(8)
+    top_decliners = movers_df.sort_values(delta_col, ascending=True).head(8)
+    movers_display = pd.concat([top_decliners, top_gainers], ignore_index=True)
+    movers_display = movers_display.drop_duplicates(subset=["photo_id"], keep="last")
+    movers_display = movers_display.sort_values(delta_col, ascending=True)
+
+    movers_fig = px.bar(
+        movers_display,
+        x=delta_col,
+        y="photo_label",
+        title=title,
+        color="direction",
+        orientation="h",
+        custom_data=["photo_id"],
+        color_discrete_map={"Gainer": "#16a34a", "Decliner": "#dc2626"},
+    )
+    movers_fig.update_layout(
+        template="plotly_white",
+        margin={"l": 24, "r": 16, "t": 56, "b": 24},
+        legend_title_text="",
+        xaxis_title=f"{metric_label} Delta",
+        yaxis_title="Photo",
+    )
+    movers_fig.update_traces(marker_line_width=0, hovertemplate=None)
+    return movers_fig
+
+
 def _load_data(db_path: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     connection = sqlite3.connect(db_path)
     try:
@@ -694,6 +738,7 @@ def _build_layout(db_path: Path) -> html.Div:
                         children=[
                             dcc.Graph(id="photo-trend-graph", style={"height": "460px"}),
                             dcc.Graph(id="top-movers-graph", style={"height": "460px"}),
+                            dcc.Graph(id="download-movers-graph", style={"height": "460px"}),
                             dcc.Graph(id="momentum-scatter-graph", style={"height": "460px"}),
                             dcc.Graph(id="efficiency-scatter-graph", style={"height": "460px"}),
                         ],
@@ -1443,35 +1488,11 @@ def create_app(
 
         delta_col = DELTA_COLUMNS.get(metric, "views_delta_since_previous")
         metric_label = METRIC_LABELS.get(metric, metric)
-        movers_df = photo_latest_df.copy()
-        movers_df[delta_col] = pd.to_numeric(movers_df[delta_col], errors="coerce").fillna(0)
-        movers_df["photo_label"] = movers_df.apply(_photo_option_label, axis=1)
-        movers_df["direction"] = movers_df[delta_col].apply(
-            lambda val: "Gainer" if val >= 0 else "Decliner"
+        top_movers_fig = _build_movers_figure(
+            photo_latest_df,
+            metric="views_total",
+            title="Biggest Movers by Views (Latest vs Previous Run)",
         )
-        top_gainers = movers_df.sort_values(delta_col, ascending=False).head(8)
-        top_decliners = movers_df.sort_values(delta_col, ascending=True).head(8)
-        movers_display = pd.concat([top_decliners, top_gainers], ignore_index=True)
-        movers_display = movers_display.drop_duplicates(subset=["photo_id"], keep="last")
-        movers_display = movers_display.sort_values(delta_col, ascending=True)
-        top_movers_fig = px.bar(
-            movers_display,
-            x=delta_col,
-            y="photo_label",
-            title=f"Biggest Movers by {metric_label} (Latest vs Previous Run)",
-            color="direction",
-            orientation="h",
-            custom_data=["photo_id"],
-            color_discrete_map={"Gainer": "#16a34a", "Decliner": "#dc2626"},
-        )
-        top_movers_fig.update_layout(
-            template="plotly_white",
-            margin={"l": 24, "r": 16, "t": 56, "b": 24},
-            legend_title_text="",
-            xaxis_title=f"{metric_label} Delta",
-            yaxis_title="Photo",
-        )
-        top_movers_fig.update_traces(marker_line_width=0, hovertemplate=None)
 
         momentum_df = photo_latest_df.copy()
         momentum_df["photo_label"] = momentum_df.apply(_photo_option_label, axis=1)
@@ -1641,6 +1662,22 @@ def create_app(
             selected_photo_id,
             selected_photo_preview,
             latest_photo_cards,
+        )
+
+    @app.callback(
+        Output("download-movers-graph", "figure"),
+        Input("refresh-button", "n_clicks"),
+        Input("collection-refresh-token", "data"),
+    )
+    def refresh_download_movers_graph(
+        _refresh_clicks: int,
+        _collection_refresh_token: int,
+    ):
+        _, _, photo_latest_df = _load_data(db_path)
+        return _build_movers_figure(
+            photo_latest_df,
+            metric="downloads_total",
+            title="Biggest Movers by Downloads (Latest vs Previous Run)",
         )
 
     return app

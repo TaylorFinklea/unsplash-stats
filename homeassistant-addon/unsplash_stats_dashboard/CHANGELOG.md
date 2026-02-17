@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.4
+
+- Add a dedicated "Biggest Movers by Downloads" chart to the dashboard.
+- Keep the existing movers chart focused on views for side-by-side comparison.
+- Add regression coverage for the new downloads-movers callback.
+
 ## 0.1.3
 
 - Fix ingress redirect loop by separating Dash external request prefix from internal route prefix.
