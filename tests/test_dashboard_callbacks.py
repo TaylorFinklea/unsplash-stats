@@ -118,27 +118,28 @@ class DashboardCallbackRegressionTests(unittest.TestCase):
         status_code, _body = self._post_old_progress_signature()
         self.assertIn(status_code, (200, 204))
 
-    def test_create_app_normalizes_ingress_path_prefix(self) -> None:
+    def test_create_app_normalizes_ingress_path_prefix_for_ha_ingress(self) -> None:
         ingress_prefix = "api/hassio_ingress/demo-token"
-        app = create_app(self.db_path, requests_pathname_prefix=ingress_prefix)
+        app = create_app(
+            self.db_path,
+            requests_pathname_prefix=ingress_prefix,
+            routes_pathname_prefix="/",
+        )
         self.assertEqual(
             app.config.requests_pathname_prefix,
             "/api/hassio_ingress/demo-token/",
         )
-        self.assertEqual(
-            app.config.routes_pathname_prefix,
-            "/api/hassio_ingress/demo-token/",
-        )
+        self.assertEqual(app.config.routes_pathname_prefix, "/")
 
         client = app.server.test_client()
-        response = client.get("/api/hassio_ingress/demo-token/")
+        response = client.get("/")
         self.assertEqual(response.status_code, 200)
-        root_response = client.get("/")
-        self.assertEqual(root_response.status_code, 302)
-        self.assertEqual(
-            root_response.headers.get("Location"),
+        self.assertIn(
             "/api/hassio_ingress/demo-token/",
+            response.get_data(as_text=True),
         )
+        layout_response = client.get("/_dash-layout")
+        self.assertEqual(layout_response.status_code, 200)
 
 
 if __name__ == "__main__":

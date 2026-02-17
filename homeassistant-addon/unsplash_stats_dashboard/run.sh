@@ -188,6 +188,8 @@ os.environ["UNSPLASH_PHOTO_CACHE_DIR"] = photo_cache_dir
 ingress_prefix = detect_ingress_prefix()
 if ingress_prefix:
     os.environ["UNSPLASH_DASH_REQUESTS_PATHNAME_PREFIX"] = ingress_prefix
+    # Home Assistant ingress strips this prefix before proxying to the add-on.
+    os.environ["UNSPLASH_DASH_ROUTES_PATHNAME_PREFIX"] = "/"
 
 command = [
     "python",
@@ -209,5 +211,6 @@ print(f"Configured Unsplash username: @{username}", flush=True)
 print(f"Database path: {database_path}", flush=True)
 if ingress_prefix:
     print(f"Dash requests path prefix: {ingress_prefix}", flush=True)
+    print("Dash routes path prefix: /", flush=True)
 os.execvp(command[0], command)
 PY

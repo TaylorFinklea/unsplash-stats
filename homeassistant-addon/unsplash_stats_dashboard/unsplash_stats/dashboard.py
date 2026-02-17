@@ -16,7 +16,7 @@ import pandas as pd
 import plotly.express as px
 from dash import ALL, Dash, Input, Output, State, ctx, dcc, html, no_update
 from dash.exceptions import PreventUpdate
-from flask import abort, redirect, send_from_directory
+from flask import abort, send_from_directory
 
 from .collector import collect_snapshot
 from .db import connect_db, init_db
@@ -150,6 +150,14 @@ def _normalize_path_prefix(value: str | None) -> str:
     if not prefix.endswith("/"):
         prefix = f"{prefix}/"
     return prefix
+
+
+def _join_prefix_and_path(prefix: str, path: str) -> str:
+    normalized_prefix = _normalize_path_prefix(prefix)
+    normalized_path = path if path.startswith("/") else f"/{path}"
+    if normalized_prefix == "/":
+        return normalized_path
+    return f"{normalized_prefix.rstrip('/')}{normalized_path}"
 
 
 def _utc_now_str() -> str:
@@ -776,16 +784,23 @@ def _kpi_card(title: str, value_id: str) -> html.Div:
 def create_app(
     db_path: Path,
     requests_pathname_prefix: str | None = None,
+    routes_pathname_prefix: str | None = None,
 ) -> Dash:
-    dash_prefix = _normalize_path_prefix(
+    dash_requests_prefix = _normalize_path_prefix(
         requests_pathname_prefix
         or os.getenv("UNSPLASH_DASH_REQUESTS_PATHNAME_PREFIX")
         or os.getenv("DASH_REQUESTS_PATHNAME_PREFIX")
     )
+    dash_routes_prefix = _normalize_path_prefix(
+        routes_pathname_prefix
+        or os.getenv("UNSPLASH_DASH_ROUTES_PATHNAME_PREFIX")
+        or os.getenv("DASH_ROUTES_PATHNAME_PREFIX")
+        or dash_requests_prefix
+    )
     app = Dash(
         __name__,
-        requests_pathname_prefix=dash_prefix,
-        routes_pathname_prefix=dash_prefix,
+        requests_pathname_prefix=dash_requests_prefix,
+        routes_pathname_prefix=dash_routes_prefix,
         external_stylesheets=[
             "https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Sans:wght@400;500;700&display=swap"
         ],
@@ -793,17 +808,17 @@ def create_app(
     app.title = "Unsplash Stats"
     app.layout = _build_layout(db_path)
 
-    if dash_prefix != "/":
-        @app.server.route("/")
-        def redirect_root_to_dash_prefix():
-            return redirect(dash_prefix, code=302)
-
     photo_cache_dir = Path(
         os.getenv("UNSPLASH_PHOTO_CACHE_DIR", str(db_path.parent / "photo_cache"))
     )
-    photo_route_prefix = app.get_relative_path("/photo-cache").rstrip("/")
+    public_photo_route_prefix = _join_prefix_and_path(
+        dash_requests_prefix, "/photo-cache"
+    )
+    internal_photo_route_prefix = _join_prefix_and_path(
+        dash_routes_prefix, "/photo-cache"
+    )
 
-    @app.server.route(f"{photo_route_prefix}/<path:filename>")
+    @app.server.route(f"{internal_photo_route_prefix}/<path:filename>")
     def serve_photo_cache(filename: str):
         safe_root = photo_cache_dir.resolve()
         requested = (safe_root / filename).resolve()
@@ -1573,7 +1588,7 @@ def create_app(
                     cache_dir=photo_cache_dir,
                     photo_id=photo_id,
                     raw_json_payload=raw_payload,
-                    route_prefix=photo_route_prefix,
+                    route_prefix=public_photo_route_prefix,
                 )
             else:
                 image_src_by_photo_id[photo_id] = _extract_photo_url(raw_payload)
@@ -1651,6 +1666,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--routes-pathname-prefix",
+        default=os.getenv("UNSPLASH_DASH_ROUTES_PATHNAME_PREFIX"),
+        help=(
+            "Optional internal route prefix seen by the app server. "
+            "Use / when a proxy strips the external path prefix before forwarding."
+        ),
+    )
+    parser.add_argument(
         "--debug", action="store_true", help="Run Dash in debug mode."
     )
     return parser.parse_args()
@@ -1662,6 +1685,7 @@ def main() -> int:
     app = create_app(
         db_path,
         requests_pathname_prefix=args.requests_pathname_prefix,
+        routes_pathname_prefix=args.routes_pathname_prefix,
     )
     app.run(host=args.host, port=args.port, debug=args.debug)
     return 0

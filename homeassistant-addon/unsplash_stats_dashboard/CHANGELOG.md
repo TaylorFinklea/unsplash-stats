@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3
+
+- Fix ingress redirect loop by separating Dash external request prefix from internal route prefix.
+- Configure add-on runtime with `UNSPLASH_DASH_ROUTES_PATHNAME_PREFIX=/` when ingress is active.
+- Keep internal Flask routes at root while generating ingress-prefixed frontend URLs.
+
 ## 0.1.2
 
 - Fix Home Assistant "Open Web UI" 404 by redirecting `/` to the active Dash ingress prefix.
