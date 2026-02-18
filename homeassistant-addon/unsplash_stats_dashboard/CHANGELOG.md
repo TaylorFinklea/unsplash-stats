@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.5
+
+- Add a dedicated "Downloads Trend" chart for the selected photo, alongside the existing views trend chart.
+- Keep the metric dropdown for other analyses while the trend pair now always shows views + downloads.
+- Add regression test coverage for the downloads trend callback.
+
 ## 0.1.4
 
 - Add a dedicated "Biggest Movers by Downloads" chart to the dashboard.

@@ -160,6 +160,26 @@ class DashboardCallbackRegressionTests(unittest.TestCase):
         )
         self.assertIn(response.status_code, (200, 204))
 
+    def test_download_trend_callback_payload_does_not_500(self) -> None:
+        self.assertIn("download-trend-graph.figure", self.app.callback_map)
+        payload = {
+            "output": "download-trend-graph.figure",
+            "outputs": {"id": "download-trend-graph", "property": "figure"},
+            "inputs": [
+                {"id": "refresh-button", "property": "n_clicks", "value": 0},
+                {"id": "collection-refresh-token", "property": "data", "value": 0},
+                {"id": "photo-dropdown", "property": "value", "value": None},
+            ],
+            "state": [],
+            "changedPropIds": ["refresh-button.n_clicks"],
+        }
+        response = self.client.post(
+            "/_dash-update-component",
+            data=json.dumps(payload),
+            content_type="application/json",
+        )
+        self.assertIn(response.status_code, (200, 204))
+
 
 if __name__ == "__main__":
     unittest.main()

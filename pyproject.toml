@@ -1,6 +1,6 @@
 [project]
 name = "unsplash-stats"
-version = "0.1.4"
+version = "0.1.5"
 description = "Point-in-time Unsplash stats collector for SQLite + CSV"
 readme = "README.md"
 requires-python = ">=3.10"

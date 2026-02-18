@@ -445,6 +445,49 @@ def _build_latest_photo_card(row: pd.Series, image_src: str | None) -> html.Div:
     )
 
 
+def _build_photo_metric_trend_figure(
+    photo_history_df: pd.DataFrame,
+    *,
+    selected_photo_id: str | None,
+    metric: str,
+    title_prefix: str,
+) -> Any:
+    metric_label = METRIC_LABELS.get(metric, metric)
+    if not selected_photo_id or photo_history_df.empty:
+        return _empty_figure(
+            title_prefix, "No photo history found for the selected photo."
+        )
+
+    selected_photo_df = photo_history_df[
+        photo_history_df["photo_id"] == selected_photo_id
+    ].copy()
+    if selected_photo_df.empty:
+        return _empty_figure(
+            title_prefix, "No photo history found for the selected photo."
+        )
+
+    selected_photo_df = selected_photo_df.sort_values("collected_at")
+    selected_photo_df[metric] = pd.to_numeric(
+        selected_photo_df[metric], errors="coerce"
+    )
+    trend_fig = px.line(
+        selected_photo_df,
+        x="collected_at",
+        y=metric,
+        markers=True,
+        title=f"{title_prefix}: {selected_photo_id}",
+        color_discrete_sequence=[COLORS.get(metric, "#0ea5a6")],
+    )
+    trend_fig.update_layout(
+        template="plotly_white",
+        showlegend=False,
+        margin={"l": 24, "r": 16, "t": 56, "b": 24},
+        xaxis_title="Collected At",
+        yaxis_title=metric_label,
+    )
+    return trend_fig
+
+
 def _build_movers_figure(
     photo_latest_df: pd.DataFrame,
     *,
@@ -737,6 +780,7 @@ def _build_layout(db_path: Path) -> html.Div:
                         },
                         children=[
                             dcc.Graph(id="photo-trend-graph", style={"height": "460px"}),
+                            dcc.Graph(id="download-trend-graph", style={"height": "460px"}),
                             dcc.Graph(id="top-movers-graph", style={"height": "460px"}),
                             dcc.Graph(id="download-movers-graph", style={"height": "460px"}),
                             dcc.Graph(id="momentum-scatter-graph", style={"height": "460px"}),
@@ -1457,34 +1501,12 @@ def create_app(
         if selected_photo_id not in option_values:
             selected_photo_id = photo_options[0]["value"] if photo_options else None
 
-        if selected_photo_id and not photo_history_df.empty:
-            selected_photo_df = photo_history_df[
-                photo_history_df["photo_id"] == selected_photo_id
-            ].copy()
-            selected_photo_df = selected_photo_df.sort_values("collected_at")
-            selected_photo_df[metric] = pd.to_numeric(
-                selected_photo_df[metric], errors="coerce"
-            )
-            metric_label = METRIC_LABELS.get(metric, metric)
-            photo_trend_fig = px.line(
-                selected_photo_df,
-                x="collected_at",
-                y=metric,
-                markers=True,
-                title=f"{metric_label} Trend: {selected_photo_id}",
-                color_discrete_sequence=[COLORS.get(metric, "#0ea5a6")],
-            )
-            photo_trend_fig.update_layout(
-                template="plotly_white",
-                showlegend=False,
-                margin={"l": 24, "r": 16, "t": 56, "b": 24},
-                xaxis_title="Collected At",
-                yaxis_title=metric_label,
-            )
-        else:
-            photo_trend_fig = _empty_figure(
-                "Photo Trend", "No photo history found for the selected photo."
-            )
+        photo_trend_fig = _build_photo_metric_trend_figure(
+            photo_history_df,
+            selected_photo_id=selected_photo_id,
+            metric="views_total",
+            title_prefix="Views Trend",
+        )
 
         delta_col = DELTA_COLUMNS.get(metric, "views_delta_since_previous")
         metric_label = METRIC_LABELS.get(metric, metric)
@@ -1678,6 +1700,27 @@ def create_app(
             photo_latest_df,
             metric="downloads_total",
             title="Biggest Movers by Downloads (Latest vs Previous Run)",
+        )
+
+    @app.callback(
+        Output("download-trend-graph", "figure"),
+        Input("refresh-button", "n_clicks"),
+        Input("collection-refresh-token", "data"),
+        Input("photo-dropdown", "value"),
+    )
+    def refresh_download_trend_graph(
+        _refresh_clicks: int,
+        _collection_refresh_token: int,
+        selected_photo_id: str | None,
+    ):
+        _, photo_history_df, photo_latest_df = _load_data(db_path)
+        if not selected_photo_id and not photo_latest_df.empty:
+            selected_photo_id = str(photo_latest_df.iloc[0]["photo_id"])
+        return _build_photo_metric_trend_figure(
+            photo_history_df,
+            selected_photo_id=selected_photo_id,
+            metric="downloads_total",
+            title_prefix="Downloads Trend",
         )
 
     return app
